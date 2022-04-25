@@ -1,3 +1,4 @@
+wd_path <- paste0(getwd(),"/")
 icount <- 0
 
 FUN <- function(x){
@@ -44,8 +45,7 @@ FUN <- function(x){
   cl <- makeCluster(mc <- getOption("cl.cores", 8))
   clusterExport(cl=cl, varlist=c("nr_sim","input", "activity","MMAscale", "cashMatrix"))
   res <- parLapply(cl, seq_len(nr_sim), function(i){
-    #Rcpp::sourceCpp("simulator1.cpp")
-    Rcpp::sourceCpp("/home/peter/Desktop/phd/codemix/BTC/BTCtoy/simulator1.cpp")
+    Rcpp::sourceCpp("simulator1.cpp")
     #input$cashMMA <- MMAscale*activity$cashMMA
     ext <- input
     ext$cashMatrix <- MMAscale*cashMatrix
@@ -108,26 +108,6 @@ stosoo <- OOR::StoSOO(initial,
                       control = list(type = "sto",
                                      light = FALSE))
 
-saveRDS(stosoo, file = "/home/peter/Desktop/phd/codemix/BTC/BTCtoy/stosoo700.rds")
-#stosoo <- readRDS(file = "/home/peter/Desktop/phd/codemix/BTC/BTCtoy/stosoo.rds")
+saveRDS(stosoo, file = paste0(wd_path,"simulated_data/stosoo.rds"))
+#stosoo <- readRDS(file = paste0(wd_path,"simulated_data/stosoo.rds"))
 
-# library(hydroPSO)
-# setwd("/home/peter/Desktop/phd/codemix/BTC/BTCtoy")
-# psoSol <- hydroPSO(fn=FUN,
-#                    lower=lower,
-#                    upper=upper,
-#                    control= list(maxit=25, normalise=TRUE, REPORT = 5, npart = 30))
-# 
-# plot_results()
-
-#best_param_set <- read_best(file="PSO.out/BestParameterSet.txt", verbose=TRUE)
-
-# bb <- data.frame("par1" = numeric(MMAseq_len), "par2" = numeric(MMAseq_len), "value" = numeric(MMAseq_len))
-# for(i in 1:MMAseq_len){
-#   bb$par1[i] <- optResExtPar[[i]]$par[1]
-#   bb$par2[i] <- optResExtPar[[i]]$par[2]
-#   bb$par3[i] <- optResExtPar[[i]]$par[3]
-#   bb$par4[i] <- optResExtPar[[i]]$par[4]
-#   bb$value[i] <- optResExtPar[[i]]$value
-# }
-# plot(y=optdf$value,x=MMAseq)
