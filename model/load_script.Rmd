@@ -1,0 +1,1023 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r packages_and_init, echo=FALSE}
+wd_path <- getwd()
+path_to_data <- "/home/peter/Desktop/phd/codemix/Bitcoin-Price-Manipulation/"
+
+#load some packages
+library(fanplot)
+library(Rcpp)
+library(gridExtra)
+library(parallel)
+library(lubridate)
+library(xts)
+library(dplyr)
+library(dygraphs)
+
+return_axes <- function(timeseries){
+  minyear <- as.numeric(substring(min(timeseries$Date),1,4))
+  maxyear <- as.numeric(substring(max(timeseries$Date),1,4))
+  positions <- c()
+  years <- c()
+  for(i in seq(minyear,maxyear,1)){
+    position <- which(paste0(i,"-01-01") == timeseries$Date)
+    if(length(position) > 0){
+      years <- c(years, i)
+      positions <- c(positions,position)
+    }
+  }
+  output <- list("names" = as.character(years), "positions" = positions)
+  return(output)
+}
+
+spagetti_plot <- function(mresults, timeseries=NULL, nsamples=10, title_name="spagetti plot", ylabel = "price", ymax=NULL, ymin=NULL){
+  cex_size <- 1.5
+  par(cex.lab=cex_size, cex.axis=cex_size, cex.main=2.0, cex.sub=cex_size)
+  
+  if(nsamples >= dim(mresults)[1]){
+    print(dim(mresults))
+    nsamples <- dim(mresults)[1] - 1
+  }
+  if(is.null(ymax) == TRUE){
+    ymax <- 5.5*mean(colMeans(mresults))
+  }
+  if(is.null(ymin) == TRUE){
+    ymin <- 0.25*mean(colMeans(mresults))
+  }
+  
+  bluemono = c("#084594", "#2171B5", "#4292C6", "#6BAED6", "#9ECAE1", "#C6DBEF", "#DEEBF7", "#F7FBFF")
+  bluemono = c(bluemono[5], bluemono[7], bluemono[8])
+  
+  if(is.null(timeseries) == FALSE && substr(title_name, start = 1, stop = nchar("Manipulated scenario")) == "Manipulated scenario"){
+    plot(timeseries$Value, main=title_name, type = "l", ylab = ylabel, xaxt='n', xlab = "time", ylim = c(ymin, ymax), xlim = c(0,dim(mresults)[2]))
+    tmp_x <- return_axes(timeseries)
+    axis(1, at = tmp_x$positions, labels = tmp_x$names)
+  }else if(is.null(timeseries)  == FALSE){
+    timeseries$Value <- rep(-1000, dim(mresults)[2])
+    plot(timeseries$Value, main=title_name, type = "l", ylab = ylabel, xaxt='n', xlab = "time", ylim = c(ymin, ymax), xlim = c(0,dim(mresults)[2]))
+    tmp_x <- return_axes(timeseries)
+    axis(1, at = tmp_x$positions, labels = tmp_x$names)
+  }else{
+    plot(NULL, main=title_name, type = "l", ylab = ylabel, xlab = "time", ylim = c(ymin, ymax), xlim = c(0,dim(mresults)[2]))
+  }
+  percentiles <- c(0.05, 0.2, 0.5, 0.8, 0.95)
+  percentiles <- c(20, 50, 95)
+  fan(mresults,
+      style = "fan",
+      ln = percentiles,
+      probs = percentiles,
+      type = "interval",
+      llab = FALSE,
+      rlab = FALSE,
+      alpha=0.25,
+      ln.col="orange",
+      med.ln = TRUE,
+      med.col = "green",
+      medlab = NULL,
+      n.spag = 0)
+  
+
+  if(is.null(timeseries) == FALSE && substr(title_name, start = 1, stop = nchar("Manipulated scenario")) == "Manipulated scenario"){
+    lines(timeseries$Value, col = "blue")
+  }
+  lines(robustbase::colMedians(mresults), col = "green")
+  
+  par(cex.lab=1.0, cex.axis=1.0, cex.main=1.0, cex.sub=1.0)
+}
+
+
+densities_plot <- function(mresults, timeseries=NULL, title_name = "Density"){
+  if(is.null(timeseries)){
+    timeseries <- data.frame("Value" = colMeans(mresults))
+  }
+  den <- density(timeseries$Value)
+  tmp = 2*max(den$y)
+  plot(density(timeseries$Value), main = title_name, lwd = 5, ylim = c(0, tmp))
+  colors_lines <- 1:dim(mresults)[1]
+  if(dim(mresults)[1] > 1000){
+    index_series <- sample(colors_lines, 1000)
+  }else{
+    index_series <- colors_lines
+  }
+  for(i in index_series){
+    lines(density(mresults[i,]), col = colors_lines[i])
+  }
+  lines(density(timeseries$Value), lwd = 5)
+}
+
+plotAll_base <- function(nr_sim, ext, parLapply_results){
+  #copying data from lists to matrices
+  Mresults <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsBuy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsSell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  
+  MresultsAvgActivity1_buy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity2_buy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity3_buy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity1_sell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity2_sell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity3_sell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsMarketVol <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsBid_ask_spread <- matrix(nrow = nr_sim, ncol = length(parLapply_results[[1]]$bid_ask_spread))
+  for(i in 1:nr_sim){
+    Mresults[i,] <- parLapply_results[[i]]$prices
+    MresultsBuy[i,] <- parLapply_results[[i]]$min_buyOrders
+    MresultsSell[i,] <- parLapply_results[[i]]$min_sellOrders
+    MresultsAvgActivity1_buy[i,] <- parLapply_results[[i]]$activity_buy[1,]
+    MresultsAvgActivity2_buy[i,] <- parLapply_results[[i]]$activity_buy[2,]
+    MresultsAvgActivity3_buy[i,] <- parLapply_results[[i]]$activity_buy[3,]
+    
+    MresultsAvgActivity1_sell[i,] <- parLapply_results[[i]]$activity_sell[1,]
+    MresultsAvgActivity2_sell[i,] <- parLapply_results[[i]]$activity_sell[2,]
+    MresultsAvgActivity3_sell[i,] <- parLapply_results[[i]]$activity_sell[3,]
+    MresultsBid_ask_spread[i,] <- parLapply_results[[i]]$bid_ask_spread
+    MresultsMarketVol[i,] <- parLapply_results[[i]]$market_volume
+  }
+
+  #Crucial statistics
+  matplot(t(Mresults), type = "l", main = "Simulated price")
+  tmp_ts <- data.frame("Value" = colMeans(Mresults), "Date" = Data$Base$Date[1:ext$nr_days])
+  spagetti_plot(Mresults, nsamples = nr_sim, title_name = "Base scenario: Bitcoin market price", ymax = 10000, ymin = 0, ylabel = "price")
+  densities_plot(Mresults, title_name = "Price emp. density")
+
+  #Activity statistics
+  plot(colMeans(MresultsAvgActivity1_buy), ylim = c(0,1.0), main = "Activity of agents BUY", type = "l", ylab = "activity", xlab = "time")
+  lines(colMeans(MresultsAvgActivity2_buy), col = "blue")
+  lines(colMeans(MresultsAvgActivity3_buy), col = "red")
+  legend("topleft", legend=c("MMA","CA", "DH"), col=c("black", "blue", "red"), lty=1:1, cex=1.0)
+
+  plot(colMeans(MresultsAvgActivity1_sell), ylim = c(0,1.0), main = "Activity of agents SELL", type = "l", ylab = "activity", xlab = "time")
+  lines(colMeans(MresultsAvgActivity2_sell), col = "blue")
+  lines(colMeans(MresultsAvgActivity3_sell), col = "red")
+  legend("topleft", legend=c("MMA","CA", "DH"), col=c("black", "blue", "red"), lty=1:1, cex=1.0)
+  
+  #orderbook related statistics
+  par(mfrow=c(3,1))
+  matplot(t(MresultsBuy), type = "l")
+  matplot(t(MresultsSell), type = "l")
+  matplot(t(MresultsBuy-MresultsSell), type = "l")
+  par(mfrow=c(1,1))
+  matplot(t(MresultsBid_ask_spread), type = "l", main = "bidask spread every minute")
+  
+  #market volume
+  matplot(t(MresultsMarketVol), type = "l", main = "Market volume")
+}
+
+plotAll <- function(nr_sim, ext, parLapply_results){
+  nsamples <- 6
+  
+
+  
+  #light data preparation
+  tmp_activityBTC_perDay <- Data$activity_BTC_perDay[Data$activity_BTC_perDay$Date >= Data$Dates$Manipulation[1] & Data$activity_BTC_perDay$Date <= Data$Dates$Manipulation[2],]
+  tmp_activityBTC_perDay$outFlow <- NULL
+  colnames(tmp_activityBTC_perDay) <- c("Value","Date")
+  tmp_activityBTC_perDay$Value <- (tmp_activityBTC_perDay$Value-mean(tmp_activityBTC_perDay$Value))/sd(tmp_activityBTC_perDay$Value)
+  
+  tmp_activityBTC <- Data$inflowBTC #inflow per transaction, not per day
+  colnames(tmp_activityBTC) <- c("Value","Date")
+  tmp_activityBTC$Value <- (tmp_activityBTC$Value-mean(tmp_activityBTC$Value))/sd(tmp_activityBTC$Value)
+  
+  
+  tmp_relativeVol <- data.frame("Value" = 0.5*Data$activity_BTC_perDay_Manipulated$inFlow/Data$dataVol$avg_exchange, "Date" = Data$activity_BTC_perDay_Manipulated$Date)
+  tmp_absoluteVol <- data.frame("Value" = 2*Data$dataVol$avg_exchange, "Date" = Data$activity_BTC_perDay_Manipulated$Date)
+  
+  Mresults <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsRelativeVol <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsMMAinflow_perDay <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsMarketVol <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  dim(Mresults)
+  for(i in 1:nr_sim){
+    dim(parLapply_results[[i]]$prices)
+    Mresults[i,] <- parLapply_results[[i]]$prices
+    MresultsMarketVol[i,] <- parLapply_results[[i]]$market_volume
+    MresultsMMAinflow_perDay[i,] <- parLapply_results[[i]]$MMAinflow_perDay
+    MresultsRelativeVol[i,] <- MresultsMMAinflow_perDay[i,]/MresultsMarketVol[i,]
+  }
+  matplot(t(Mresults), type = "l", main = "Simulated price", ylim = c(100,10000))
+  matplot(t(MresultsRelativeVol), type = "l", main = "Relative volume")
+  plot(tmp_relativeVol$Value, main = "real relative volume", type = "l")
+  
+  #removing broaken values
+  index_vec <- c()
+  nr_default <- 0
+  for(i in 1:nr_sim){
+    if(parLapply_results[[i]]$default == TRUE){
+      print(paste0("default at: ",i))
+      nr_default <- nr_default + 1
+    }else{
+      index_vec <- c(index_vec, i)
+    }
+  }
+  print(paste0("number of defaults = ", nr_default))
+  nr_sim <- length(index_vec)
+  print(paste0("number of defaults = ", nr_default))
+  
+  #copying data from lists to matrices
+  Mresults <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsBuy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsSell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity1_buy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity2_buy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity3_buy <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity1_sell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity2_sell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsAvgActivity3_sell <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsMMAinflow_perDay <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsMarketVol <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsRelativeVol <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsSlope <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  MresultsBid_ask_spread <- matrix(nrow = nr_sim, ncol = length(parLapply_results[[1]]$bid_ask_spread))
+  MresutsNtrans <- vector(length = nr_sim)
+  MresultsReturns <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+  index <- 1
+  for(i in index_vec){
+      Mresults[index,] <- parLapply_results[[i]]$prices
+      MresultsBuy[index,] <- parLapply_results[[i]]$min_buyOrders
+      MresultsSell[index,] <- parLapply_results[[i]]$min_sellOrders
+      MresultsAvgActivity1_buy[index,] <- parLapply_results[[i]]$activity_buy[1,]
+      MresultsAvgActivity2_buy[index,] <- parLapply_results[[i]]$activity_buy[2,]
+      MresultsAvgActivity3_buy[index,] <- parLapply_results[[i]]$activity_buy[3,]
+      
+      MresultsAvgActivity1_sell[index,] <- parLapply_results[[i]]$activity_sell[1,]
+      MresultsAvgActivity2_sell[index,] <- parLapply_results[[i]]$activity_sell[2,]
+      MresultsAvgActivity3_sell[index,] <- parLapply_results[[i]]$activity_sell[3,]
+      
+      
+      MresultsMMAinflow_perDay[index,] <- parLapply_results[[i]]$MMAinflow_perDay
+      MresultsMarketVol[index,] <- parLapply_results[[i]]$market_volume
+      MresultsRelativeVol[index,] <- MresultsMMAinflow_perDay[index,]/MresultsMarketVol[index,]
+      MresutsNtrans[index] <- length(parLapply_results[[i]]$MMAinflow)
+      MresultsBid_ask_spread[index,] <- parLapply_results[[i]]$bid_ask_spread
+      MresultsReturns[index,] <- parLapply_results[[i]]$BTCamount
+      MresultsSlope[index,] <- parLapply_results[[i]]$slope
+      index <- index + 1
+  }
+  
+  print(length(tmp_activityBTC$Value))
+  print(sd(as.vector(Mresults)))
+  #Crucial statistics
+  matplot(t(Mresults), type = "l", main = "Simulated price", ylim = c(0,50000))
+  spagetti_plot(Mresults, Data$Manipulation, nsamples, title_name = "Manipulated scenario: market price", ymax = 30000, ymin = 0, ylabel = "price")
+  densities_plot(Mresults, Data$Manipulation, "Price emp. density")
+
+  matplot(t(MresultsMMAinflow_perDay), type = "l", main = "MMA inflow per day")
+  for(i in 1:nr_sim){
+    MresultsMMAinflow_perDay[i,] <- (MresultsMMAinflow_perDay[i,] - mean(MresultsMMAinflow_perDay[i,]))/sd(MresultsMMAinflow_perDay[i,])
+  }
+  spagetti_plot(MresultsMMAinflow_perDay, tmp_activityBTC_perDay, nsamples, title_name = "Manipulated scenario: FA's Bitcoin inflow", ylabel = "price")
+  densities_plot(MresultsMMAinflow_perDay, tmp_activityBTC_perDay, "MMA inflow per day (standardized) emp. density")
+    
+  MresultsRelativeVol[which(!is.finite(MresultsRelativeVol))] <- 0.0
+  if(0 %in% MresultsMarketVol){
+    print("Inf in relativeVol, division by zero")
+  }
+  matplot(t(MresultsRelativeVol), type = "l", main = "MMA relative volume")
+  spagetti_plot(MresultsRelativeVol, tmp_relativeVol, nsamples, title_name = "Manipulated scenario: relative volume", ylabel = "price")
+  densities_plot(MresultsRelativeVol, tmp_relativeVol, "MMA relative volume emp. density")
+  
+  matplot(t(MresultsMarketVol), type = "l", main = "Market volume")
+  for(i in 1:nr_sim){
+    MresultsMarketVol[i,] <- (MresultsMarketVol[i,] - mean(MresultsMarketVol[i,]))/sd(MresultsMarketVol[i,])
+  }
+  tmp_absoluteVol$Value <- (tmp_absoluteVol$Value - mean(tmp_absoluteVol$Value))/sd(tmp_absoluteVol$Value)
+  spagetti_plot(MresultsMarketVol, tmp_absoluteVol, nsamples, title_name = "Manipulated scenario: market volume", ylabel = "price")
+  densities_plot(MresultsMarketVol, tmp_absoluteVol, "Market volume emp. density")
+
+  
+  #Activity statistics
+  plot(colMeans(MresultsAvgActivity1_buy), ylim = c(0,1.0), main = "Activity of agents BUY", type = "l", ylab = "activity", xlab = "time")
+  lines(colMeans(MresultsAvgActivity2_buy), col = "blue")
+  lines(colMeans(MresultsAvgActivity3_buy), col = "red")
+  legend("topleft", legend=c("MMA","CA", "DH"), col=c("black", "blue", "red"), lty=1:1, cex=1.0)
+
+  plot(colMeans(MresultsAvgActivity1_sell), ylim = c(0,1.0), main = "Activity of agents SELL", type = "l", ylab = "activity", xlab = "time")
+  lines(colMeans(MresultsAvgActivity2_sell), col = "blue")
+  lines(colMeans(MresultsAvgActivity3_sell), col = "red")
+  legend("topleft", legend=c("MMA","CA", "DH"), col=c("black", "blue", "red"), lty=1:1, cex=1.0)
+  
+  #orderbook related statistics
+  par(mfrow=c(3,1))
+  matplot(t(MresultsBuy), type = "l")
+  matplot(t(MresultsSell), type = "l")
+  matplot(t(MresultsBuy-MresultsSell), type = "l")
+  par(mfrow=c(1,1))
+  matplot(t(MresultsReturns), type = "l", main = "returns")
+  spagetti_plot(MresultsReturns, timeseries = Data$Manipulation, title_name = "Bitcoin balance of the fraudulen agent", ylabel = "price")
+  
+}
+
+plotToFile <- function(nr_sim, ext, parLapply_results, scenario_name){
+  nsamples <- 6
+  wid <- 1200
+  hei <- 550
+  
+  results_path <- paste0(wd_path,"/results/")
+  
+  if(scenario_name == "Manipulated scenario"){
+    
+    #light data preparation
+    tmp_activityBTC_perDay <- Data$activity_BTC_perDay[Data$activity_BTC_perDay$Date >= Data$Dates$Manipulation[1] & Data$activity_BTC_perDay$Date <= Data$Dates$Manipulation[2],]
+    tmp_activityBTC_perDay$outFlow <- NULL
+    colnames(tmp_activityBTC_perDay) <- c("Value","Date")
+    tmp_activityBTC_perDay$Value <- (tmp_activityBTC_perDay$Value-mean(tmp_activityBTC_perDay$Value))/sd(tmp_activityBTC_perDay$Value)
+    
+    tmp_activityBTC <- Data$inflowBTC #inflow per transaction, not per day
+    colnames(tmp_activityBTC) <- c("Value","Date")
+    tmp_activityBTC$Value <- (tmp_activityBTC$Value-mean(tmp_activityBTC$Value))/sd(tmp_activityBTC$Value)
+    
+    
+    tmp_relativeVol <- data.frame("Value" = 0.5*Data$activity_BTC_perDay_Manipulated$inFlow/Data$dataVol$avg_exchange, "Date" = Data$activity_BTC_perDay_Manipulated$Date)
+    tmp_absoluteVol <- data.frame("Value" = 2*Data$dataVol$avg_exchange, "Date" = Data$activity_BTC_perDay_Manipulated$Date)
+    
+    #removing the cases where the FA exits
+    index_vec <- c()
+    nr_default <- 0
+    for(i in 1:nr_sim){
+      if(parLapply_results[[i]]$default == TRUE){
+        print(paste0("default at: ",i))
+        nr_default <- nr_default + 1
+      }else{
+        index_vec <- c(index_vec, i)
+      }
+    }
+    print(paste0("number of defaults = ", nr_default))
+    nr_count <- length(index_vec)
+
+    
+    #copying data from lists to matrices
+    Mresults <- matrix(nrow = nr_count, ncol = ext$nr_days)
+    MresultsMMAinflow_perDay <- matrix(nrow = nr_count, ncol = ext$nr_days)
+    MresultsMarketVol <- matrix(nrow = nr_count, ncol = ext$nr_days)
+    MresultsRelativeVol <- matrix(nrow = nr_count, ncol = ext$nr_days)
+    MresutsNtrans <- vector(length = nr_count)
+    MresultsReturns <- matrix(nrow = nr_count, ncol = ext$nr_days)
+    index <- 1
+    for(i in index_vec){
+      Mresults[index,] <- parLapply_results[[i]]$prices
+      MresultsMMAinflow_perDay[index,] <- parLapply_results[[i]]$MMAinflow_perDay
+      MresultsMarketVol[index,] <- parLapply_results[[i]]$market_volume
+      MresultsRelativeVol[index,] <- MresultsMMAinflow_perDay[index,]/MresultsMarketVol[index,]
+      MresutsNtrans[index] <- length(parLapply_results[[i]]$MMAinflow)
+      MresultsReturns[index,] <- parLapply_results[[i]]$BTCamount
+      index <- index + 1
+    }
+    
+    #price time series
+    png(paste0(results_path,scenario_name,": Bitcoin market price.png"), width = wid, height = hei)
+    spagetti_plot(Mresults, Data$Manipulation, nsamples, title_name = paste0(scenario_name,": Bitcoin market price"), ymax = 30000, ymin = 0, ylabel = "price")
+    dev.off()
+    
+    #Bitcoin inflow
+    png(paste0(results_path,scenario_name,": Bitcoin inflow.png"), width = wid, height = hei)
+    for(i in 1:nr_count){
+      MresultsMMAinflow_perDay[i,] <- (MresultsMMAinflow_perDay[i,] - mean(MresultsMMAinflow_perDay[i,]))/sd(MresultsMMAinflow_perDay[i,])
+    }
+    spagetti_plot(MresultsMMAinflow_perDay, tmp_activityBTC_perDay, nsamples, title_name = paste0(scenario_name,": Bitcoin inflow"), ymax = 7, ymin = -1, ylabel = "amount")
+    dev.off()
+    
+    #relative volume
+    png(paste0(results_path,scenario_name,": Relative volume.png"), width = wid, height = hei)
+    MresultsRelativeVol[which(!is.finite(MresultsRelativeVol))] <- 0.0
+    if(0 %in% MresultsMarketVol){
+      print("Inf in relativeVol, division by zero")
+    }
+    spagetti_plot(MresultsRelativeVol, tmp_relativeVol, nsamples, title_name = paste0(scenario_name,": Relative volume"), ymax = 0.3, ylabel = "amount")
+    dev.off()
+    
+    #volume
+    png(paste0(results_path,scenario_name,": Market volume.png"), width = wid, height = hei)
+    for(i in 1:nr_count){
+      #print(paste0("maxMarketVolume[", i, "] = ", max(MresultsMarketVol[i,])))
+      MresultsMarketVol[i,] <- (MresultsMarketVol[i,] - mean(MresultsMarketVol[i,]))/sd(MresultsMarketVol[i,])
+    }
+    tmp_absoluteVol$Value <- (tmp_absoluteVol$Value - mean(tmp_absoluteVol$Value))/sd(tmp_absoluteVol$Value)
+    spagetti_plot(MresultsMarketVol, tmp_absoluteVol, nsamples, title_name = paste0(scenario_name,": Market volume"), ymax = 8, ymin = -2, ylabel = "amount")
+    dev.off()
+    
+    #BTC balance here change the y-axes you dumbass!!!
+    png(paste0(results_path,scenario_name,": Bitcoin balance of the fraudulen agent.png"), width = wid, height = hei)
+    spagetti_plot(MresultsReturns, timeseries = Data$Manipulation, title_name = "Bitcoin balance of the fraudulen agent", ymax = 750, ymin = 0, ylabel = "BTC balance")
+    
+  }else{
+    Mresults <- matrix(nrow = nr_sim, ncol = ext$nr_days)
+    index <- 1
+    index_vec <- 1:nr_sim
+    for(i in index_vec){
+      Mresults[index,] <- parLapply_results[[i]]$prices
+      index <- index + 1
+    }
+    #price time series (3000 for base, 8000 for susceptible, 15000 for ssLSE)
+    png(paste0(results_path,scenario_name,": Bitcoin market price.png"), width = wid, height = hei)
+    spagetti_plot(Mresults, Data$Manipulation, nsamples, title_name = paste0(scenario_name,": Bitcoin market price"), ymin = 0, ymax = 15000, ylabel = "price")
+    dev.off()
+  }
+  
+}
+
+
+```
+
+
+# Price data
+
+```{r load_data, echo=FALSE}
+market_value <- read.csv(paste0(path_to_data, "market_value.csv"), header = TRUE)
+market_value <- market_value[which(market_value$Date >= as.Date("2011-01-01")),]
+
+#library(Quandl)
+#market_value <- Quandl("BCHAIN/MKPRU")
+#write.csv(market_value, "~/Desktop/phd/codemix/BTC_clean/market_value.csv")
+
+market_value$X = NULL
+if(class(market_value$Date) != "Date"){
+  market_value$Date <- as.Date(market_value$Date)
+}
+
+Data <- list("All" = market_value, 
+             "Manipulation" = NULL, 
+             "Dates" = data.frame("All" = c(market_value$Date[length(market_value$Date)], market_value$Date[1]),
+                                  "Base" = as.Date(c("2015-01-01", "2017-01-01")),
+                                  "Manipulation" = as.Date(c("2017-01-01", "2018-03-01")))
+             )
+
+
+row.names(Data$Dates) <- c("start","end")
+Data$Dates
+Data$All$Value <- rev(Data$All$Value)
+Data$All$Date <- rev(Data$All$Date)
+
+# Base
+Data$Base <- market_value[which(market_value$Date <= Data$Dates$Base[2]),]
+Data$Base <- Data$Base[which(Data$Base$Date >= Data$Dates$Base[1]),]
+Data$Base$Value <- rev(Data$Base$Value)
+Data$Base$Date <- rev(Data$Base$Date)
+
+# Manipulated 
+Data$Manipulation <- market_value[which(market_value$Date <= Data$Dates$Manipulation[2]),]
+Data$Manipulation <- Data$Manipulation[which(Data$Manipulation$Date >= Data$Dates$Manipulation[1]),]
+Data$Manipulation$Value <- rev(Data$Manipulation$Value)
+Data$Manipulation$Date <- rev(Data$Manipulation$Date)
+
+
+plot(Data$All, type = "l", main = "Market Value of BTC in USD")
+lines(y=Data$Manipulation$Value,x=Data$Manipulation$Date, col = "red")
+legend("topleft", legend=c("Market Value", "Manipulated period"), col=c("black", "red"), lty=1:1, cex=1.0)
+```
+
+```{r returns}
+prices <- Data$Manipulation$Value
+log_returns <- diff(log(prices), lag=1)
+plot(log_returns, type = "l")
+hist(log_returns, breaks = 20)
+acf(log_returns)
+pacf(log_returns, lag.max = 30)
+```
+
+# BTC and THT inflow/outflow
+
+## BTC 1LSg flows
+
+```{r activityBTC}
+
+Data$activity_BTC <- read.csv(paste0(path_to_data, "processedData/activity_BTC.csv"), header = TRUE)
+Data$activity_BTC_perDay <- read.csv(paste0(path_to_data, "processedData/activity_BTC_perDay.csv"), header = TRUE)
+Data$inflowBTC <- read.csv(paste0(path_to_data, "processedData/inflowBTC.csv"), header = TRUE)
+
+Data$activity_BTC$X <- NULL
+Data$activity_BTC_perDay$X <- NULL
+Data$inflowBTC$X <- NULL
+
+Data$activity_BTC_Manipulated <-  Data$activity_BTC[which(as.Date(Data$activity_BTC$Time) >= as.Date(Data$Dates$Manipulation[1])),]
+Data$activity_BTC_Manipulated <-  Data$activity_BTC_Manipulated[as.Date(Data$activity_BTC_Manipulated$Time) <= as.Date(Data$Dates$Manipulation[2]),]
+
+
+Data$activity_BTC_perDay_Manipulated <- Data$activity_BTC_perDay[Data$activity_BTC_perDay$Date >= Data$Dates$Manipulation[1] & Data$activity_BTC_perDay$Date <= Data$Dates$Manipulation[2],]
+
+Data$activity_BTC_perDay_Manipulated$nr_orders <- vector(length = length(Data$activity_BTC_perDay_Manipulated$Date))
+index <- 1
+theDate <- as.Date(Data$activity_BTC_Manipulated$Time[1])
+while (theDate <= as.Date(tail(Data$activity_BTC_Manipulated$Time,1))) {
+  tmp_txs <- which(as.Date(Data$activity_BTC_Manipulated$Time) == theDate)
+  Data$activity_BTC_perDay_Manipulated$nr_orders[index] <- length(tmp_txs)
+  theDate <- theDate + 1
+  index <- index + 1
+}
+plot(Data$activity_BTC_perDay_Manipulated$nr_orders, main = "number of inflows per day")
+
+
+Data$activity_BTC_perDay$Date <- as.Date(Data$activity_BTC_perDay$Date)
+Data$activity_BTC$Time <- as.POSIXct(Data$activity_BTC$Time, tz = "UTC")
+
+hist(Data$inflowBTC$Value, breaks = 100)
+plot(x=as.Date(Data$activity_BTC_perDay$Date), y=Data$activity_BTC_perDay$inFlow, type = "l", main ="In/Out flow per day 1LSg")
+lines(x=Data$activity_BTC_perDay$Date, y=abs(Data$activity_BTC_perDay$outFlow), type = "l", col = "green")
+hist(Data$activity_BTC_perDay$inFlow, breaks = 100)
+plot(x=Data$activity_BTC$Time, y=Data$activity_BTC$Change, type = "l", main = "Increment for address 1LSg")
+
+#total send:
+sum(Data$activity_BTC$Change[which(Data$activity_BTC$Change < 0)])
+#total received:
+sum(Data$activity_BTC$Change[which(Data$activity_BTC$Change > 0)])
+# the same as on blockchain.com, looks good
+plot(x=Data$activity_BTC$Time, y=Data$activity_BTC$Balance, type = "l", main = "Balance after each transaction")
+
+
+#write.csv(Data$activity_BTC ,"~/Desktop/phd/codemix/BTC_clean/processedData/activity_BTC.csv", row.names = TRUE)
+#write.csv(Data$activity_BTC_perDay ,"~/Desktop/phd/codemix/BTC_clean/processedData/activity_BTC_perDay.csv", row.names = TRUE)
+#write.csv(Data$inflowBTC,"~/Desktop/phd/codemix/BTC_clean/processedData/inflowBTC.csv", row.names = TRUE)
+```
+
+## THT 1J1d + 1AA6 and 1MZA flows
+
+```{r activityTHT}
+Data$activity_THT_1AA6 <- read.csv(paste0(path_to_data, "processedData/activity_THT_1AA6.csv"), header = TRUE)
+Data$activity_THT_1J1d <- read.csv(paste0(path_to_data, "processedData/activity_THT_1J1d.csv"), header = TRUE)
+Data$activity_THT_1MZA <- read.csv(paste0(path_to_data, "processedData/activity_THT_1MZA.csv"), header = TRUE)
+
+Data$activity_THT <- read.csv(paste0(path_to_data, "processedData/activity_THT.csv"), header = TRUE)
+Data$activity_THT_perDay <- read.csv(paste0(path_to_data, "processedData/activity_THT_perDay.csv"), header = TRUE)
+
+Data$activity_THT_1AA6$X <- NULL
+Data$activity_THT_1J1d$X <- NULL
+Data$activity_THT_1MZA$X <- NULL
+Data$activity_THT$X <- NULL
+Data$activity_THT_perDay$X <- NULL
+Data$activity_THT_1J1d$Time <- as_datetime(Data$activity_THT_1J1d$Time)
+Data$activity_THT_1AA6$Time <- as_datetime(Data$activity_THT_1AA6$Time)
+Data$activity_THT_1MZA$Time <- as_datetime(Data$activity_THT_1MZA$Time)
+Data$activity_THT$Time <- as_datetime(Data$activity_THT$Time)
+
+
+plot(x=Data$activity_THT_1J1d$Time, y=Data$activity_THT_1J1d$Amount, type = "l", main = "1J1d") 
+plot(x=Data$activity_THT_1AA6$Time, y=Data$activity_THT_1AA6$Amount, type = "l", main = "1AA6")
+plot(x=Data$activity_THT_1MZA$Time, y=Data$activity_THT_1MZA$Amount, type = "l", main = "1MZA")
+plot(x=Data$activity_THT$Time, y=Data$activity_THT$Balance, type="l",main="1J1d + 1AA6")
+plot(x=Data$activity_THT[Data$activity_THT$Amount < 0,]$Time, y=abs(Data$activity_THT[Data$activity_THT$Amount < 0,]$Amount), type = "l", main = "outflow", ylab = "amount", xlab="time")
+
+plot(x=Data$activity_THT_1AA6$Time,y=Data$activity_THT_1AA6$Balance, type = "l", main = "balance 1AA6")
+plot(x=Data$activity_THT_1J1d$Time,y=Data$activity_THT_1J1d$Balance, type = "l", main = "balance 1J1d")
+plot(x=Data$activity_THT$Time,y=Data$activity_THT$Balance, type = "l", main = "Balance THT")
+
+# looking at time patterns
+theDate <- as.Date(Data$Dates$Manipulation[1], format="%y-%m-%d")
+seconds_tmp <- c()
+while (theDate <= as.Date(Data$Dates$Manipulation[2], format="%y-%m-%d")) {
+  tmp_txs <- which(as.Date(Data$activity_THT$Time, format="%y-%m-%d") == theDate)
+  seconds_tmp <-  c(seconds_tmp,period_to_seconds(hms(format(Data$activity_THT$Time[tmp_txs],"%H:%M:%S"))))
+  theDate <- theDate + 1
+}
+hist(seconds_tmp, breaks = 100)
+
+Data$activity_THT_perDay$Date <- as.Date(Data$activity_THT_perDay$Date)
+plot(x=Data$activity_THT_perDay$Date,y=abs(Data$activity_THT_perDay$outFlow), type = "l")
+abline(v=as.Date("2018-01-13","%Y-%m-%d"), col = "orange")
+abline(v=as.Date("2017-11-13","%Y-%m-%d"), col = "orange")
+abline(v=as.Date("2017-09-13","%Y-%m-%d"), col = "orange")
+abline(v=as.Date("2017-07-13","%Y-%m-%d"), col = "orange")
+abline(v=as.Date("2017-05-13","%Y-%m-%d"), col = "orange")
+plot(x=Data$activity_THT_perDay$Date,y=Data$activity_THT_perDay$Nout, type = "l")
+plot(x=Data$activity_THT_perDay$Date,y=Data$activity_THT_perDay$inFlow, type = "l")
+plot(x=Data$activity_THT_perDay$Date,y=Data$activity_THT_perDay$Nin, type = "l")
+
+Data$activity_THT_1AA6 <- NULL
+Data$activity_THT_1J1d <- NULL
+Data$activity_THT_1MZA <- NULL
+
+#write.csv(Data$activity_THT_1AA6 ,"~/Desktop/phd/codemix/BTC_clean/processedData/activity_THT_1AA6.csv", row.names = TRUE)
+#write.csv(Data$activity_THT_1J1d ,"~/Desktop/phd/codemix/BTC_clean/processedData/activity_THT_1J1d.csv", row.names = TRUE)
+#write.csv(Data$activity_THT_1MZA ,"~/Desktop/phd/codemix/BTC_clean/processedData/activity_THT_1MZA.csv", row.names = TRUE)
+
+#write.csv(Data$activity_THT ,"~/Desktop/phd/codemix/BTC_clean/processedData/activity_THT.csv", row.names = TRUE)
+#write.csv(Data$activity_THT_perDay ,"~/Desktop/phd/codemix/BTC_clean/processedData/activity_THT_perDay.csv", row.names = TRUE)
+```
+
+```{r action_matrix}
+generate_action_matrix <- function(){
+  THTout <- Data$activity_THT[Data$activity_THT$Amount < 0,]
+  THTout$Amount <- abs(THTout$Amount)
+  THTout <- THTout[THTout$Time >= Data$Dates$Manipulation[1] & THTout$Time <= Data$Dates$Manipulation[2],]
+
+  nrdays <- length(Data$Manipulation$Value)
+  Tt <- 24*60
+  M <- matrix(0, nrow = nrdays, ncol = Tt)
+  
+  
+  THTout$Seconds <- as.numeric(as.POSIXct(THTout$Time)) - as.numeric(as.POSIXct(Data$Dates$Manipulation[1]))
+  THTout$Days <- ceiling(THTout$Seconds / (24*60*60))
+  THTout$Sec_in_day <- THTout$Seconds - ((THTout$Days-1)*(24*60*60))
+  THTout$Min_in_day <- floor(THTout$Sec_in_day / 60) 
+  #View(THTout)
+  for(i in 1:nrdays){
+    days_index <- which(THTout$Days == i)
+    if(length(days_index) > 0){
+      amounts_in_day <- THTout[days_index,]
+      index <- 1
+      for(j in amounts_in_day$Min_in_day){
+        M[i,j] <- M[i,j] + amounts_in_day$Amount[index]
+        index <- index + 1
+      }
+    }else{
+      M[i,] <- rep(0,Tt)
+    }
+  }
+  return(M)
+}
+```
+
+```{r MMAcash_dist}
+tmpManipulated <- Data$activity_THT_perDay[Data$activity_THT_perDay$Date >= Data$Dates$Manipulation[1] & Data$activity_THT_perDay$Date <= Data$Dates$Manipulation[2],]
+mean(tmpManipulated$Nout)
+plot(abs(tmpManipulated$outFlow), type = "l", main = "THT-TS per day", xlab = "time", ylab = "THT(time))") 
+#warning: can be deceiving if there is zero outflow for given day
+plot(abs(tmpManipulated$outFlow)/Data$Manipulation$Value, type = "l", main = "THT-TS per day", xlab = "time", ylab = "THT(time)/price(time)") 
+
+
+Data$activity_THT_manipulated <- Data$activity_THT[Data$activity_THT$Time >= as.Date(Data$Dates$Manipulation[1], format="%y-%m-%d"),]
+Data$activity_THT_manipulated <- Data$activity_THT_manipulated[Data$activity_THT_manipulated$Time <= as.Date(Data$Dates$Manipulation[2], format="%y-%m-%d"),]
+Data$activity_THT_manipulated$Amount <- abs(Data$activity_THT_manipulated$Amount)
+num_of_send <- vector(length = length(Data$Manipulation$Date))
+max_send <- vector(length = length(Data$Manipulation$Date))
+index <- 1
+theDate <- as.Date(Data$activity_THT_manipulated$Time[1], format="%y-%m-%d")
+while (theDate <= as.Date(tail(Data$activity_THT_manipulated$Time,1), format="%y-%m-%d")) {
+  tmp_txs <- which(as.Date(Data$activity_THT_manipulated$Time, format="%y-%m-%d") == theDate)
+  if(length(tmp_txs) > 0){
+    num_of_send[index] <- length(tmp_txs)
+    max_send[index] <- max(Data$activity_THT_manipulated$Amount[tmp_txs])
+    Data$activity_THT_manipulated$Amount[tmp_txs] <- Data$activity_THT_manipulated$Amount[tmp_txs]/Data$Manipulation$Value[index]
+  }else{
+    num_of_send[index] <- 1
+    max_send[index] <- 0
+  }
+  theDate <- theDate + 1
+  index <- index + 1
+}
+hist(Data$activity_THT_manipulated$Amount, breaks = 200, xlim = c(0,2000), main = "amount/price per send")
+plot(Data$activity_THT_manipulated$Amount, main = "amount/price per send")
+
+plot(num_of_send, main = "number of sends", type = "l")
+
+plot((abs(tmpManipulated$outFlow)/Data$Manipulation$Value), type = "l", main = "THT_day(time)/price(time)", xlab = "time", ylab = "THT(time)/price(time)")
+lines(max_send/Data$Manipulation$Value, col = "red")
+
+```
+
+# EoM dips, Cash matrix and = vector
+
+## EoM dips
+
+```{r EOMdips}
+plot(Data$Manipulation, type = "l", main = "Market Value of BTC in USD")
+abline(v=as.Date("2018-01-13","%Y-%m-%d"), col = "orange")
+abline(v=as.Date("2017-11-13","%Y-%m-%d"), col = "orange")
+abline(v=as.Date("2017-09-13","%Y-%m-%d"), col = "orange")
+abline(v=as.Date("2017-07-13","%Y-%m-%d"), col = "orange")
+activity <- list("cashMMA" = NULL, "activityCA" = NULL, "EOM" = NULL)
+activity$EOM <- c(194, 256, 317, 378)
+```
+
+# Trade volume
+
+## Trade volume total 
+
+```{r trade_vol_roofit}
+tmpdf <- read.csv(paste0(path_to_data, "bitcoinity_data.csv"), header = TRUE)
+tmpdf$Time <- as.Date(tmpdf$Time,"%Y-%m-%d")
+tmpdf <- tmpdf[which(tmpdf$Time <= Data$Dates$Manipulation[2]),]
+tmpdf <- tmpdf[which(tmpdf$Time >= Data$Dates$Manipulation[1]-92),]
+#tmpdf$Time <- NULL
+tmpdf$btcchina <- NULL
+tmpdf$huobi <- NULL
+tmpdf$okcoin <- NULL
+tmpdf$bittrex <- NULL
+tmpdf$poloniex <- NULL
+tmpdf$Sum <- rowSums(tmpdf[-1], na.rm = T)
+tmpSum <- data.frame("Date" = tmpdf$Time, "Sum" = tmpdf$Sum)
+plot(tmpSum, type = "l")
+pacf(tmpSum$Sum)
+dff_vol <- diff(tmpSum$Sum)
+pacf(dff_vol)
+plot(dff_vol, type = "l")
+#write(dff_vol, file = "~/anaconda3/envs/PeterRootEnv/tutorials/roofit/diffvolume.txt", sep = "\n")
+```
+
+
+
+
+```{r relative_total_market_vol}
+Data$dataVol <- read.csv(paste0(path_to_data, "bitcoinity_data.csv"), header = TRUE)
+Data$dataVol$Time <- as.Date(Data$dataVol$Time,"%Y-%m-%d")
+Data$dataVol <- Data$dataVol[which(Data$dataVol$Time <= Data$Dates$Manipulation[2]),]
+Data$dataVol <- Data$dataVol[which(Data$dataVol$Time >= Data$Dates$Manipulation[1]),]
+tmpDF <- Data$dataVol
+tmpDF$Time = NULL
+tmpSum = rowSums(tmpDF, na.rm = T)
+remove(tmpDF)
+plot(y=Data$activity_BTC_perDay_Manipulated$inFlow/tmpSum, x=Data$dataVol$Time, type = "l", main = "Relative influence of MMA on the market", xlab = "Date", ylab = "inflow/trade_vol")
+
+matplot(as.matrix(Data$dataVol[,-1]), type = "l", ylim = c(0, 200000))
+```
+
+## Trade volume on Bittnex and Poloinex
+
+```{r relative_market_vol}
+tmp_vol <- list()
+for(i in 0:5){
+  link <- paste0(paste0(path_to_data, "poloniex_vol/poloniex"),i,".csv")
+  tmp_vol[[i+1]] <- read.csv(link,header = TRUE)
+}
+Data$dataVol_pol <- rbind(tmp_vol[[1]],tmp_vol[[2]],tmp_vol[[3]],tmp_vol[[4]],tmp_vol[[5]],tmp_vol[[6]])
+Data$dataVol_pol$timestamp <- as.Date(Data$dataVol_pol$timestamp)
+colnames(Data$dataVol_pol) <- c("Date","Volume")
+Data$dataVol_pol <- Data$dataVol_pol[Data$dataVol_pol$Date >= Data$Dates$Manipulation[1] & Data$dataVol_pol$Date <= Data$Dates$Manipulation[2],]
+Data$dataVol_pol <- Data$dataVol_pol[-200,] #DUPLICATE!
+plot(Data$dataVol_pol, type = "l")
+tmp_vol <- list()
+for(i in 0:5){
+  link <- paste0(paste0(path_to_data, "bittrex_vol/bittrex"),i,".csv")
+  tmp_vol[[i+1]] <- read.csv(link,header = TRUE)
+}
+Data$dataVol_bit <- rbind(tmp_vol[[1]],tmp_vol[[2]],tmp_vol[[3]],tmp_vol[[4]],tmp_vol[[5]],tmp_vol[[6]])
+remove(tmp_vol)
+Data$dataVol_bit$timestamp <- as.Date(Data$dataVol_bit$timestamp)
+colnames(Data$dataVol_bit) <- c("Date","Volume")
+Data$dataVol_bit <- Data$dataVol_bit[Data$dataVol_bit$Date >= Data$Dates$Manipulation[1] & Data$dataVol_bit$Date <= Data$Dates$Manipulation[2],]
+plot(Data$dataVol_bit, type = "l")
+
+Data$dataVol$bittrex <- Data$dataVol_bit$Volume
+Data$dataVol$poloniex <- Data$dataVol_pol$Volume
+
+Data$dataVol_pb <- data.frame("Volume" = Data$dataVol_pol$Volume + Data$dataVol_bit$Volume, "Date" = Data$dataVol_bit$Date)
+Data$dataVol_pb$Volume <- rev(Data$dataVol_pb$Volume) 
+Data$dataVol_pb$Date <- rev(Data$dataVol_pb$Date) 
+
+# coinbase, bitFlyer
+  plot(y=Data$activity_BTC_perDay_Manipulated$inFlow/Data$dataVol$coinbase, x=Data$dataVol$Time, type = "l", main = "Relative influence of MMA on Coinbase", ylab = "inflow/BFX_trade_vol")
+plot(y=Data$activity_BTC_perDay_Manipulated$inFlow/Data$dataVol$bitflyer, x=Data$dataVol$Time, type = "l", main = "Relative influence of MMA on bitFlyer", ylab = "inflow/BFX_trade_vol")
+
+matplot(as.matrix(Data$dataVol[,-1]), type = "l", ylim = c(0, 400000000), main = "Clear indication of wash trading on poloniex and bittrex")
+plot(y=Data$activity_BTC_perDay_Manipulated$inFlow/Data$dataVol_pb$Volume, x=Data$dataVol$Time, type = "l", main = "Relative influence of MMA on Poloniex + Bittrex", ylab = "inflow/BFX_trade_vol")
+
+```
+
+```{r avg_exchange}
+
+Data$dataVol$btcchina <- NULL
+Data$dataVol$huobi <- NULL
+Data$dataVol$okcoin <- NULL
+Data$dataVol$bittrex <- NULL
+Data$dataVol$poloniex <- NULL
+Data$dataVol[,-1]
+Data$dataVol$avg_exchange <- rowSums(Data$dataVol[,-1])
+plot(x=Data$dataVol$Time,y=Data$dataVol$avg_exchange, type = "b", main = "average exchange")
+```
+
+
+
+
+```{r flagging}
+plot(x=Data$dataVol$Time,y=Data$dataVol$avg_exchange, type = "l", main = "", ylab = "volume", xlab = "date")
+
+dens <- 30
+# 77, 145, 195, 257, 314, 381
+
+#MMA EoM
+rect(Data$dataVol$Time[74],min(Data$dataVol$avg_exchange),Data$dataVol$Time[78],max(Data$dataVol$avg_exchange),col="red",density = dens, border = "transparent")
+rect(Data$dataVol$Time[144],min(Data$dataVol$avg_exchange),Data$dataVol$Time[148],max(Data$dataVol$avg_exchange),col="red",density = dens, border = "transparent")
+rect(Data$dataVol$Time[194],min(Data$dataVol$avg_exchange),Data$dataVol$Time[204],max(Data$dataVol$avg_exchange),col="red",density = dens, border = "transparent")
+rect(Data$dataVol$Time[256],min(Data$dataVol$avg_exchange),Data$dataVol$Time[260],max(Data$dataVol$avg_exchange),col="red",density = dens, border = "transparent")
+rect(Data$dataVol$Time[314],min(Data$dataVol$avg_exchange),Data$dataVol$Time[319],max(Data$dataVol$avg_exchange),col="red",density = dens, border = "transparent")
+rect(Data$dataVol$Time[379],min(Data$dataVol$avg_exchange),Data$dataVol$Time[383],max(Data$dataVol$avg_exchange),col="red",density = dens, border = "transparent")
+
+#Whale buy
+rect(Data$dataVol$Time[332],min(Data$dataVol$avg_exchange),Data$dataVol$Time[335],max(Data$dataVol$avg_exchange),col="blue",density = dens, border = "transparent")
+  rect(Data$dataVol$Time[341],min(Data$dataVol$avg_exchange),Data$dataVol$Time[345],max(Data$dataVol$avg_exchange),col="blue",density = dens, border = "transparent")
+rect(Data$dataVol$Time[355],min(Data$dataVol$avg_exchange),Data$dataVol$Time[357],max(Data$dataVol$avg_exchange),col="blue",density = dens, border = "transparent")
+
+#whale sell
+rect(Data$dataVol$Time[355],min(Data$dataVol$avg_exchange),Data$dataVol$Time[357],max(Data$dataVol$avg_exchange),col="green",density = dens, border = "transparent")
+rect(Data$dataVol$Time[397],min(Data$dataVol$avg_exchange),Data$dataVol$Time[399],max(Data$dataVol$avg_exchange),col="green",density = dens, border = "transparent")
+rect(Data$dataVol$Time[401],min(Data$dataVol$avg_exchange),Data$dataVol$Time[403],max(Data$dataVol$avg_exchange),col="green",density = dens, border = "transparent")
+
+
+LSEb <- c(333, 334, 341, 342, 343, 345)
+LSEs <- c(344, 356, 397, 401, 402, 403)
+
+
+
+
+#lines(x=Data$dataVol$Time,y=Data$dataVol$avg_exchange, type = "l", lwd = 1.5)
+```
+
+```{r EoM_params}
+print("Ratios EoMs: ")
+print("-----------------------------")
+print("-----------------------------")
+print("MAY: ")
+daysMay <- c(145, 146)
+Data$dataVol$Time[daysMay]
+vmax <- max(Data$dataVol$avg_exchange[daysMay])
+vcoefs <- Data$dataVol$avg_exchange[daysMay]/vmax
+vcoefs/sum(vcoefs)
+print("-----------------------------")
+print("JULY: ")
+daysJuly <- c(195, 196, 197, 198, 199)
+Data$dataVol$Time[daysJuly]
+vmax <- max(Data$dataVol$avg_exchange[daysJuly])
+vcoefs <- Data$dataVol$avg_exchange[daysJuly]/vmax
+vcoefs/sum(vcoefs)
+print("-----------------------------")
+print("SEP: ")
+daysSep <- c(257, 258)
+Data$dataVol$Time[daysSep]
+vmax <- max(Data$dataVol$avg_exchange[daysSep])
+vcoefs <- Data$dataVol$avg_exchange[daysSep]/vmax
+vcoefs/sum(vcoefs)
+print("-----------------------------")
+print("NOV: ")
+daysNov <- c(314, 315)
+Data$dataVol$Time[daysNov]
+vmax <- max(Data$dataVol$avg_exchange[daysNov])
+vcoefs <- Data$dataVol$avg_exchange[daysNov]/vmax
+vcoefs/sum(vcoefs)
+print("-----------------------------")
+print("JAN: ")
+daysJan <- c(381, 382, 383)
+Data$dataVol$Time[daysJan]
+vmax <- max(Data$dataVol$avg_exchange[daysJan])
+vcoefs <- Data$dataVol$avg_exchange[daysJan]/vmax
+vcoefs/sum(vcoefs)
+```
+
+
+```{r ratios}
+Data$dataVol$avg_exchange <- rowMeans(Data$dataVol[,-1])
+avgExch_mean <- mean(Data$dataVol$avg_exchange[which(Data$dataVol$avg_exchange < mean(Data$dataVol$avg_exchange) + 2*sd(Data$dataVol$avg_exchange))])
+ratiosLSEb <- Data$dataVol$avg_exchange[LSEb]/avgExch_mean
+ratiosLSEs <- Data$dataVol$avg_exchange[LSEs]/avgExch_mean
+print("Ratios LSE buy: ")
+ratiosLSEb
+print("Ratios LSE sell: ")
+ratiosLSEs
+```
+
+
+
+
+# Distributions
+
+## amounts 
+
+```{r amount_dists}
+
+#c(Data$order_book$Poloniex$amount, Data$order_book$Bittrex$amount, Data$order_book$Gemini_tick$amount)
+
+
+btc_amount <- function(n,p=0.05){
+  return_v <- vector(length = n)
+  for(i in 1:n){
+    if(runif(1) < p){
+      #return_v[i] <- rpois(1,0.5)
+      #if(return_v[i] == 0){
+      #  return_v[i] <- 0.1
+      #}
+      return_v[i] <- 0.5+0.5*rpois(1,2.0)
+    }else{
+      return_v[i] <- rexp(1,2.750)
+    }
+  }
+  return(return_v)
+}
+
+hist(btc_amount(1000), breaks = 20)
+
+```
+
+## order books
+
+```{r gaussPar}
+price <- 1000
+meanP <- 1.00
+sigmaP <- 0.02
+
+randSell <- price*rnorm(10000, meanP, sigmaP)
+randBuy <- price/rnorm(10000, meanP, sigmaP)
+hist(randSell, breaks = 200, main = "sell", probability = TRUE)
+hist(randBuy, breaks = 200, main = "buy", probability = TRUE)
+plot(density(randSell), xlim = c(950,1500), main = "sell")
+plot(density(randBuy), xlim = c(500,1050), main = "sell")
+pareto_scale <- 3.50
+sigma_scale <- 0.01/sigmaP
+hist(1000*(meanP+sigma_scale*sigmaP)*EnvStats::rpareto(10000,1,pareto_scale), breaks = 200, main = "buy")
+
+randSell <- c(randSell, 1000*(meanP+sigma_scale*sigmaP)*EnvStats::rpareto(10000,1,pareto_scale) )
+randBuy <- c(randBuy, 2000-EnvStats::rpareto(10000,1000*(meanP+sigma_scale*sigmaP),pareto_scale) )
+
+plot(density(randSell), xlim = c(950,1500), main = "sell")
+plot(density(randBuy), xlim = c(500,1050), main = "buy")
+```
+
+```{r gaussbeta}
+price <- 1000
+meanP <- 1.00
+sigmaP <- 0.1
+
+randSell <- price*rnorm(10000, meanP, sigmaP)
+randBuy <- price/rnorm(10000, meanP, sigmaP)
+hist(randSell, breaks = 200, main = "sell", probability = TRUE)
+hist(randBuy, breaks = 200, main = "buy", probability = TRUE)
+plot(density(randSell), xlim = c(950,1500), main = "sell")
+plot(density(randBuy), xlim = c(500,1050), main = "sell")
+
+pleft <- 0.99
+pright <- 0.0105
+a=3.500
+b=1
+
+randsell_new <- 1000*(-pleft+pright)*rbeta(10000,a,b) + (1+pleft)*1000
+randbuy_new <-  1000*(-pleft+pright)*rbeta(10000,b,a) + (1-pright)*1000
+
+hist(randsell_new, breaks = 100, main = "sell")
+hist(randbuy_new, breaks = 100, main = "buy")
+
+randSell <- c(randSell, randsell_new)
+randBuy <- c(randBuy, randbuy_new)
+
+plot(density(randSell), xlim = c(950,1500), main = "sell")
+plot(density(randBuy), xlim = c(500,1050), main = "buy")
+```
+
+
+## define error function
+
+```{r calc_error}
+get_moments <- function(time_series){
+  return(c(moments::moment(time_series, order = 1), moments::moment(time_series, order = 2), moments::moment(time_series, order = 3), moments::moment(time_series, order = 4)))
+}
+MSMerror <- function(timeseries, Ndays){
+  err <- (get_moments(timeseries[1:Ndays]) - get_moments(targetEx[1:Ndays]))/get_moments(targetEx[1:Ndays])
+   W <- diag(4)
+  return(err %*% W %*% err)
+}
+
+targetMan <- Data$Manipulation$Value
+targetEx <- (Data$dataVol$avg_exchange - mean(Data$dataVol$avg_exchange))/sd(Data$dataVol$avg_exchange)
+
+calc_error <- function(res, Ndays){
+
+  #mean-absolute error
+  maerr <- mean(abs(res$prices[1:Ndays] - targetMan[1:Ndays]))
+  
+  #peak maximum error
+  EOM <- c(77, 145, 146, 195, 196, 197, 198, 199, 257, 258, 314, 315, 381, 382, 383)
+  LSEb <- c(333, 334, 341, 342, 343, 345)
+  LSEs <- c(344, 356, 397, 401, 402)
+  peakpoints <- c(EOM, LSEb, LSEs)
+  
+  sdvolume <- sd(res$market_volume)
+  if(is.numeric(sdvolume) && is.finite(sdvolume)){
+    volume <- (res$market_volume - mean(res$market_volume))/sdvolume
+  }else{
+    volume <- rep(0.0, Ndays)
+  }  
+  volume <- volume[peakpoints]
+  volumeErr <- max(abs(volume - targetEx[peakpoints]))
+
+  return(maerr + 200*volumeErr)
+  #return(wightedTS)
+}
+
+error_plot <- function(nr_sim, parLapply_results){
+  error_vec <- vector(length = nr_sim)
+  for(i in 1:nr_sim){
+    error_vec[i] <- calc_error(parLapply_results[[i]], which.max(Data$Manipulation$Value))
+    print(paste0("error[",i,"] = ",error_vec[i]))
+  }
+  if(nr_sim > 60){
+    hist(error_vec, breaks = 40)
+  }else{
+    hist(error_vec, breaks = round(nr_sim/2))
+  }
+  
+  best_sim = order(error_vec)
+  plot(Data$Manipulation, type = "l", ylim = c(0,40000))
+  for(i in 1:5){
+    lines(x=Data$Manipulation$Date,y=parLapply_results[[best_sim[i]]]$price, type = "l", col = colors()[10*i])
+  }
+  print(paste0("mean error: ", mean(error_vec)))
+}
+
+```
+
+
+
+
+
+
+
+
+

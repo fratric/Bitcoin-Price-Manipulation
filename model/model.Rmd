@@ -1,0 +1,300 @@
+---
+title: "Artificial blockchain markets artificially Manipulationled?"
+author: "Peter Fratric"
+bibliography: references.bib
+output: pdf_document
+---
+
+## Load data
+
+```{r load_stuff}
+#run load_Script.Rmd
+
+wd_path <- paste0(getwd(),"/")
+results_path <- paste0(wd_path,"results/")
+#path_to_data <- "/home/peter/Desktop/phd/codemix/Bitcoin-Price-Manipulation/"
+
+#tempR <- tempfile(fileext = ".R")
+library(knitr)
+#purl("load_script.Rmd", output=tempR)
+#source(tempR)
+#unlink(tempR)
+knit("load_script.Rmd")
+```
+
+## Memory clearing
+
+```{r clear_order}
+gc()
+```
+
+
+## Activity vector and Amount vector
+
+
+```{r activityMMA}
+tmpManipulated <- Data$activity_THT_perDay[Data$activity_THT_perDay$Date >= Data$Dates$Manipulation[1] & Data$activity_THT_perDay$Date <= Data$Dates$Manipulation[2],]
+mean(tmpManipulated$Nout)
+
+
+cash_perDay <-  abs(tmpManipulated$outFlow)
+
+amount_perDay <- Data$activity_BTC_perDay_Manipulated$inFlow
+
+hist(cash_perDay, breaks = 50)
+hist(amount_perDay, breaks = 50)
+
+pacf(amount_perDay)
+pacf(cash_perDay)
+
+cashMatrix <- generate_action_matrix()
+```
+
+# Manipulated scenario
+
+```{r locopt}
+stosoo <- readRDS(file = paste0(wd_path, "simulated_data/stosoo.rds"))
+bpar <- stosoo$par
+bpar <- data.frame(as.list(bpar))
+
+iset <- 1
+
+MMAscale <- bpar$MMAscale[iset]	 #0.00225
+input <- list("nr_days"= 425,
+              "Tt" = 1440,
+              "meanN" = 1.00,
+              "varN" = bpar$varN[iset],
+              "a" = bpar$a[iset],
+              "b" = 1.00,
+              "pleft" = 0.5,
+              "pright" = 0.015,
+              "lShort" = 6,
+              "cashMMA" = MMAscale*cashMatrix,
+              "prob_drop" = bpar$prob_drop[iset],
+              "pCA_long" = bpar$pCA_long[iset], # increasing this worked well
+              "percent" =  bpar$percent[iset],
+              "pRA" = bpar$pRA[iset],
+              "pRSA" = bpar$pRSA[iset],
+              "LSEbool" = TRUE) #0.08
+
+
+
+nr_sim <- 160
+cl <- makeCluster(mc <- getOption("cl.cores", 8))
+clusterExport(cl=cl, varlist=c("nr_sim","input","MMAscale", "cashMatrix"))
+parLapply_results <- parLapply(cl, seq_len(nr_sim), function(i){
+
+  Rcpp::sourceCpp("simulator1.cpp")
+  ext <- input
+  ext$cashMatrix <- MMAscale*cashMatrix
+  #print(paste0("totalcash = ",sum(input$cashMMA)))
+  
+  simulator1(TRUE,ext$nr_days,ext$Tt,ext$meanN,ext$varN,ext$a,ext$b,ext$pleft,ext$pright,ext$lShort,ext$cashMMA,ext$prob_drop,ext$pCA_long,ext$percent,ext$pRA,ext$pRSA,ext$LSEbool)
+})
+stopCluster(cl)
+plotAll(nr_sim, input, parLapply_results)
+error_plot(nr_sim, parLapply_results)
+
+```
+
+
+```{r results}
+#ext <- input
+
+save(parLapply_results, file=paste0(wd_path, "simulated_data/parLapply_results.RData"))
+#load(paste0(wd_path,"simulated_data/parLapply_results.RData"))
+nr_sim <- length(parLapply_results)
+
+plotToFile(nr_sim, input, parLapply_results,"Manipulated scenario")
+#remove(parLapply_results)  
+gc()
+```
+
+## Sensitivity
+
+```{r sensitivity}
+apars <-  seq(2.00,6.0, 0.25)
+colmeans <- matrix(nrow = length(apars), ncol = input$nr_days)
+for(k in 1:length(apars)){
+  nr_sim <- 80
+  cl <- makeCluster(mc <- getOption("cl.cores", 8))
+  apar <- apars[k]
+  clusterExport(cl=cl, varlist=c("nr_sim","input", "activity","MMAscale", "cashMatrix","apar","results_path"))
+  parLapply_results_sens <- parLapply(cl, seq_len(nr_sim), function(i){
+    #Rcpp::sourceCpp("simulator1.cpp")
+    Rcpp::sourceCpp(paste0(results_path,"simulator1.cpp"))
+    #input$cashMMA <- MMAscale*activity$cashMMA
+    ext <- input
+    ext$a <- apar
+    ext$cashMatrix <- MMAscale*cashMatrix
+    #print(paste0("totalcash = ",sum(input$cashMMA)))
+    simulator1(TRUE,ext$nr_days,ext$Tt,ext$meanN,ext$varN,ext$a,ext$b,ext$pleft,ext$pright,ext$lShort,ext$cashMMA,ext$prob_drop,ext$pCA_long,ext$percent,ext$pRA,ext$pRSA,ext$LSEbool)
+  })
+  stopCluster(cl)
+  mresults <- matrix(nrow = nr_sim, ncol = input$nr_days)
+  for(j in 1:nr_sim){
+    mresults[j,] <- parLapply_results_sens[[j]]$prices
+  }
+  colmeans[k,] <- colMeans(mresults) 
+}
+png(paste0(results_path,"a_sensitivity.png"), width = 680, height = 320)
+matplot(t(colmeans), type = "l", ylab = "price", xaxt='n', lwd = 1.75)
+tmp_x <- return_axes(Data$Manipulation)
+axis(1, at = tmp_x$positions, labels = tmp_x$names)
+legend("top", paste0("a = ", as.character(apars)), col=seq_len(length(apars)), cex=0.8, fill=seq_len(length(apars)))
+dev.off()
+rm(parLapply_results_sens)
+saveRDS(colmeans, file = paste0(results_path,"colmeans.rds"))
+
+colmeans <- readRDS(file = paste0(results_path,"colmeans.rds"))
+
+tmpx <- apars
+tmpy <- vector(length = dim(colmeans)[1])
+for(i in 1:dim(colmeans)[1]){
+  tmpy[i] <- max(colmeans[i,])
+}
+plot(y=tmpy, x = tmpx)
+abline(lm(tmpy ~ tmpx))
+# the line is not expected to be linear if the $a$ parameter gets too big (don't forget to mention this)
+library(ggplot2)
+df <- data_frame("x" = tmpx, "y" = tmpy)
+png(paste0(results_path,"/a_sensitivity.png"), width = 680, height = 320)
+ggplot(df, aes(x=x, y=y)) + ylab("maximum of the average") + xlab("scale parameter") + geom_point() + geom_smooth(method=lm, level=0.95)
+dev.off()
+```
+
+
+# Base scenario
+
+```{r simulator_base, echo=FALSE}
+ext <- input
+ext$cashMMA = 0.0*input$cashMMA
+ext$pCA_short = 0.0
+ext$pCA_long = 0.0
+ext$LSEbool = FALSE
+
+nr_sim <- 500
+cl <- makeCluster(mc <- getOption("cl.cores", 8))
+clusterExport(cl=cl, varlist=c("nr_sim", "ext"))
+parLapply_results_base <- parLapply(cl, seq_len(nr_sim), function(i){
+  Rcpp::sourceCpp("simulator.cpp")
+  simulator_base(TRUE,ext$nr_days,ext$Tt,ext$meanN,ext$varN,ext$a,ext$b,ext$pleft,ext$pright,ext$lShort,ext$cashMMA,ext$prob_drop,ext$pCA_long,ext$percent,ext$pRA,ext$pRSA,ext$LSEbool)
+})
+stopCluster(cl)
+plotAll_base(nr_sim, input, parLapply_results_base)
+gc()
+```
+
+```{r base_plots}
+ext <- input
+ext$cashMMA = 0.0*input$cashMMA
+ext$pCA_short = 0.0
+ext$pCA_long = 0.0
+ext$LSEbool = FALSE
+
+save(parLapply_results_base, file=paste0(wd_path, "simulated_data/parLapply_results_base.RData"))
+#load(paste0(wd_path, "simulated_data/parLapply_results_base.RData"))
+nr_sim <- length(parLapply_results_base)
+
+pvals <- vector(length = nr_sim)
+for(i in 1:nr_sim){ 
+  pvals[i] <- tseries::adf.test(parLapply_results_base[[i]]$prices)$p.value # low pvalue -> stationary (alternative hypothesis)
+  #pvals[i] <- Box.test(parLapply_results_base[[i]]$prices, lag = 10)$p.value
+}
+png(paste0(results_path,"pvalues_histo.png"), width = 1200, height = 550)
+hist(pvals, breaks = 50, main = "Histogram of p-values of Augmented Dickey–Fuller test",xlab = "p-values",xlim = c(0,1))
+abline(v=0.05, col="red", lwd=3, lty=2)
+#pvals
+dev.off()
+
+plotToFile(nr_sim, input,parLapply_results_base,"Base scenario")
+remove(parLapply_results_base)
+gc()
+```
+
+
+# Susceptible scenario
+
+```{r simulator_Susceptible, echo=FALSE}
+ext <- input
+ext$cashMMA = 0.0*input$cashMMA
+ext$LSEbool = FALSE
+
+nr_sim <- 500
+cl <- makeCluster(mc <- getOption("cl.cores", 8))
+clusterExport(cl=cl, varlist=c("nr_sim", "ext"))
+parLapply_results_suscep <- parLapply(cl, seq_len(nr_sim), function(i){
+  Rcpp::sourceCpp("simulator.cpp")
+  simulator_base(TRUE,ext$nr_days,ext$Tt,ext$meanN,ext$varN,ext$a,ext$b,ext$pleft,ext$pright,ext$lShort,ext$cashMMA,ext$prob_drop,ext$pCA_long,ext$percent,ext$pRA,ext$pRSA,ext$LSEbool)
+})
+stopCluster(cl)
+plotAll_base(nr_sim, input, parLapply_results_suscep)
+```
+
+
+```{r suscep_plots}
+ext <- input
+ext$cashMMA = 0.0*input$cashMMA
+ext$LSEbool = FALSE
+
+save(parLapply_results_suscep, file=paste0(wd_path, "simulated_data/parLapply_results_suscep.RData"))
+#load(paste0(wd_path, "simulated_data/parLapply_results_suscep.RData"))
+
+spe <- vector(length = nr_sim)
+for(i in 1:nr_sim){
+  spe[i] <- max(parLapply_results_suscep[[i]]$prices)
+}
+png(paste0(results_path,"maximum_values_histo_suscep.png"), width = 680, height = 320)
+hist(spe, breaks = 50, main = "Histogram of maximum values for Susceptible scenario", xlab = "maximum")
+dev.off()
+
+plotToFile(nr_sim,ext,parLapply_results_suscep,"Susceptible scenario")
+remove(parLapply_results_suscep)
+gc()
+```
+
+
+# Susceptible scenario with LSE
+
+
+```{r simulator_suscepLSE, echo=FALSE}
+ext <- input
+ext$cashMMA = 0.0*input$cashMMA
+ext$LSEbool = TRUE
+
+nr_sim <- 500
+cl <- makeCluster(mc <- getOption("cl.cores", 8))
+clusterExport(cl=cl, varlist=c("nr_sim", "ext"))
+parLapply_results_suscepLSE <- parLapply(cl, seq_len(nr_sim), function(i){
+  Rcpp::sourceCpp("simulator.cpp")
+  simulator_base(TRUE,ext$nr_days,ext$Tt,ext$meanN,ext$varN,ext$a,ext$b,ext$pleft,ext$pright,ext$lShort,ext$cashMMA,ext$prob_drop,ext$pCA_long,ext$percent,ext$pRA,ext$pRSA,ext$LSEbool)
+})
+stopCluster(cl)
+plotAll_base(nr_sim, ext, parLapply_results_suscepLSE)
+```
+
+```{r suscepLSE_plots}
+ext <- input
+ext$cashMMA = 0.0*input$cashMMA
+ext$LSEbool = TRUE
+
+save(parLapply_results_suscepLSE, file=paste0(wd_path, "simulated_data/parLapply_results_suscepLSE.RData"))
+#load(paste0(wd_path, "simulated_data/parLapply_results_suscepLSE.RData"))
+
+spe <- vector(length = nr_sim)
+for(i in 1:nr_sim){
+  spe[i] <- max(parLapply_results_suscepLSE[[i]]$prices)
+}
+png(paste0(results_path,"maximum_values_histo_suscepLSE.png"), width = 680, height = 320)
+hist(spe, breaks = 50, main = "Histogram of maximum values for Susceptible scenario with Large Scale Events", xlab = "maximum")
+dev.off()
+
+plotToFile(nr_sim,ext,parLapply_results_suscepLSE,"Susceptible scenario with Large Scale Events")
+remove(parLapply_results_suscepLSE)
+gc()
+```
+
+
+
+
+
